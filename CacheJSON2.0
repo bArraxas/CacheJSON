@@ -1,0 +1,438 @@
+Class Utils.JSON Extends %String
+{
+
+/*
+	Original Code By: Yonatan
+	Date: 03/14/2010
+	Version: 1.0
+	
+	Modified by: Dan McCracken
+	Date: 10/27/2011
+	Version 1.1
+	Description: Added method for encoding a simple cache object, containing simple datatypes.
+				 Added method to return an object as an %ArrayOfDataTypes as a helper when creating a %ListOfDataTypes,
+				 	containing an array of objects to be encoded.
+				 Fixed a bug that allowed %String property types to be unescaped when they qualified for $ISVALIDNUM()
+				 	Strings containing a period character need to be escaped with quotes.
+				 Added classmethod to return an object loaded with the properties from an encoded JSON string.
+				 
+	Modified by: Yuval Golan
+	Date: 12/17/2014
+	Version 1.2
+	Description: Fixed a bug that allowed %String property types to be unescaped when they qualified for $ISVALIDNUM()
+	                For example strings containing only numeric characters that start with zero (i.e. "0123") and strings
+                               that start with a plus sign and then numeric characters (i.e. "+123").
+		             Fixed a bug that returned inner objects as %ArrayOfDataTypes instead of there class type.
+	
+	Modified by: Anthony Contino
+	Date: 01/06/2015
+	Version 2.0
+	Description:
+		- Add possibility of insert/update directly from json (if id=0 -> .%New(), else %OpenId(id)
+		- %Libraries.Date supported
+		- %Library.GlobalCharacterStream supported
+		- %Boolean supported
+		- RelationShip supported
+			To display the child item, the property "name" of the child will be used.
+			To param it you can add Parameter JSONLIBELLE into the child class
+			The JSONLIBELLE can be simple exemple "libelle" or complexe. Example "item.libelle"
+		- Property as Object supported (JSONLIBELLE to set the property for display)
+		
+		
+	
+*/
+Parameter EscapeChar As COSEXPRESSION = "$LB($LB(""\"",""\\""),$LB($C(13),""\n""),$LB($C(10),""\r""),$LB($C(9),""\t""),$LB("""""""",""\""""""),$LB($C(8),""\b""),$LB($C(12),""\f""))";
+
+Parameter UnEscapeChar As COSEXPRESSION = "$LB(""\\"",""\n"",""\r"",""\t"",""\"""""",""\b"",""\f"")";
+
+Parameter JSonSlice [ Final, Internal ] = 1;
+
+Parameter JSonInString [ Final, Internal ] = 2;
+
+Parameter JSonInArray [ Final, Internal ] = 3;
+
+Parameter JSonInObject [ Final, Internal ] = 4;
+
+ClassMethod GetEscapeChars() As %String
+{
+  Quit ..#EscapeChar
+}
+
+ClassMethod SetAux(what As %String, where As %Integer, delim As %String) As %DataType [ Internal ]
+{
+  s aux = ##class(%ArrayOfDataTypes).%New() 
+  d aux.SetAt(what,"what")
+  d aux.SetAt(where,"where") 
+  d aux.SetAt(delim,"delim")
+  q aux
+}
+
+/// we know that it's not escaped because there is _not_ an
+/// odd number of backslashes at the end of the string so far
+ClassMethod isEscaped(str As %String, c As %String) As %Boolean [ Internal ]
+{
+  s pos=$F(str,c)
+  q ($L($E(str,1,pos))-$L($REPLACE($E(str,1,pos),"\","")))#2=1
+}
+
+/// Escapes the string. 
+ClassMethod Escape(str As %String) As %String [ Internal ]
+{
+  for tI=1:1:$LL(..#EscapeChar) { 
+	s tCharPair = $LG(..#EscapeChar,tI)
+	s str = $Replace(str,$LG(tCharPair,1),$LG(tCharPair,2))
+  }
+  Quit str
+}
+
+ClassMethod Unescape(str As %String) As %String [ Internal ]
+{
+  for tI=1:1:$Length(str) {
+	s tChar = $ListFind(..#UnEscapeChar,$E(str,tI,tI+1))
+	if (tChar>0){
+	  s $E(str,tI,tI+1) = $LG($LG(..#EscapeChar,tChar),1)
+	}
+  }
+  Quit str
+}
+
+/// Decode a string JSON. 
+ClassMethod Decode(str As %String) As %ArrayOfDataTypes
+{
+  #dim stack as %ListOfDataTypes
+  s matchType=$ZCVT(str,"L")
+ 
+  q:(matchType="true") "1"
+  q:(matchType="false") "0"
+  q:(matchType="null") ""  
+  q:($ISVALIDNUM(matchType)) matchType 
+  q:str?1"""".E1"""" ..Unescape($e(str,2,$l(str)-1))
+  //$replace($e(str,2,$l(str)-1),"\""","""")
+ 
+  // array or object notation
+  s match=str?1(1"[".E1"]",1"{".E1"}")
+  s stack=##class(%ListOfDataTypes).%New()
+ 
+  if match {
+	if $E(str,1)="[" {
+	  d stack.Insert(..#JSonInArray)
+	  s arr=##class(%ListOfDataTypes).%New()
+	}
+	else {
+	  d stack.Insert(..#JSonInObject) 
+	  s obj=##class(%ArrayOfDataTypes).%New()
+	}
+   
+	d stack.Insert(..SetAux(..#JSonSlice,1,"false"))
+   
+	s chars=$E(str,2,$L(str)-1)
+   
+	if chars="" {
+	  if stack.GetAt(1)=..#JSonInArray {
+		q arr
+	  }
+	  else {
+		q obj
+	  }  
+	}
+
+	s strlenChars=$L(chars)+1
+
+	s escaped=0
+	For c=1:1:strlenChars {
+	  s last=stack.Count()
+	  s top=stack.GetAt(last)
+	 
+	  s:(escaped=2) escaped=0
+	  s:(escaped=1) escaped=2
+	 
+	  s substrC2=$E(chars,c-1,c)
+	  if ($E(chars,c,c)="\")&&(escaped=0) s escaped=1
+	  
+	  if $e(chars,c)="" {
+		s a=22
+	  }
+	 
+	  if (c=strlenChars || ($E(chars,c)=",")) && (top.GetAt("what")=..#JSonSlice) {
+		// found a comma that is not inside a string, array, etc.,
+		// OR we've reached the end of the character list
+		s slice = $E(chars, top.GetAt("where"),c-1)
+		d stack.Insert(..SetAux(..#JSonSlice,c+1,"false"))
+		if stack.GetAt(1)=..#JSonInArray {
+		  // we are in an array, so just push an element onto the stack
+		  d arr.Insert(..Decode(slice)) 
+		}
+		elseif stack.GetAt(1)=..#JSonInObject {
+		  // we are in an object, so figure
+		  // out the property name and set an
+		  // element in an associative array,
+		  // for now 
+				   
+		  s match=slice?." "1""""1.E1""""." "1":"1.E
+		  if match {
+			//'name':value par
+			s key1=$p(slice,":")
+			s key=..Decode(key1)
+
+			s val=..Decode($P(slice,":",2,$l(slice,":"))) 
+			d obj.SetAt(val, key)
+					
+		  }
+		}
+	  }
+	  elseif $E(chars,c)="""" && (top.GetAt("what")'=..#JSonInString) {
+		// found a quote, and we are not inside a string
+		d stack.Insert(..SetAux(..#JSonInString,c,$E(chars,c)))
+	  }
+	  elseif $E(chars,c)=top.GetAt("delim") && (top.GetAt("what")=..#JSonInString) && (escaped=0) {
+		// found a quote, we're in a string, and it's not escaped (look 3 charachters behind, to see the \" is not \\" )
+		s last=stack.Count()
+		s st=stack.RemoveAt(last)
+	  }
+	  elseif ($E(chars,c)="[") && (top.GetAt("what")'=..#JSonInString) && ($CASE(top.GetAt("what"),..#JSonInString:1,..#JSonInArray:1,..#JSonSlice:1,:0)) { 
+		// found a left-bracket, and we are in an array, object, or slice
+		d stack.Insert(..SetAux(..#JSonInArray,c,"false"))
+	  }
+	  elseif $E(chars,c)="]" && (top.GetAt("what")=..#JSonInArray) {
+		// found a right-bracket, and we're in an array
+		s last=stack.Count()
+		s st=stack.RemoveAt(last) 
+	  }
+	  ;modificacio 19/11/08: ..#JSonString -> #JSonInArray
+	  elseif $E(chars,c)="{" && ($CASE(top.GetAt("what"),..#JSonSlice:1,..#JSonInArray:1,..#JSonInObject:1,:0)) {
+		// found a left-brace, and we are in an array, object, or slice
+		d stack.Insert(..SetAux(..#JSonInObject,c,"false"))
+	  }
+	  elseif $E(chars,c)="}" && (top.GetAt("what")=..#JSonInObject) {
+		// found a right-brace, and we're in an object 
+		s last=stack.Count()
+		s st=stack.RemoveAt(last) 
+	  }
+	 
+	}  
+   
+	if stack.GetAt(1)=..#JSonInObject {
+	  q obj
+	}
+	elseif stack.GetAt(1)=..#JSonInArray {
+	  q arr
+	}
+  }
+  q str
+}
+
+/// Encode a Cache string to a JSON string
+ClassMethod Encode(data As %DataType) As %String
+{
+  if $IsObject(data) {
+	s typeData=data.%ClassName()
+
+	if (typeData="%ArrayOfDataTypes") {
+	  //type object
+	  s key=""
+	  s cad=""
+	  F {
+		s pData=data.GetNext(.key)
+		q:key=""
+		s value=..Encode(pData)
+		s cad=$S(cad'="":cad_",",1:"")_""""_..Escape(key)_""":"_value  
+	  } 
+	  q "{"_cad_"}"
+	}
+	elseif (typeData="%ListOfDataTypes") {
+	  //type array 
+	  s cad=""
+	  f i=1:1:data.Count() {
+		s tmp=..Encode(data.GetAt(i))
+		s cad=$S(i>1:cad_",",1:"")_tmp
+	  }
+	 
+	  q "["_cad_"]"
+	}
+	// Edit:Add 2015
+	// Persistent object
+	elseif (typeData="%GlobalBinaryStream") {
+		s piece = ""
+		while (data.AtEnd = 0) {
+			s piece = piece_data.Read()
+		}
+		q """"_..Escape(piece)_""""
+	}
+	// Edit:Add 2015
+	// Persistent object
+	else {
+		s className = $P(data, "@", 2)
+		s libelle = $PARAMETER(className, "JSONLIBELLE")
+		
+		s isLink = $L(libelle, ".")=2
+		
+		// Cas des liens (RelationShip)
+		if isLink {
+			s child = $ZObjProperty(data, $P(libelle, ".", 1))
+			s childLibelle = $P(libelle, ".", 2)
+			
+			s key=""
+	  		s cad=""
+	  		for {
+				s pData = data.GetNext(.key)
+				q:key=""
+				s value = ..Encode(pData)
+				s cad = $S(cad'="":cad_",",1:"")_""""_..Escape(key)_""":"_value
+	  		}
+	  		s isProperty = $Find(childLibelle, "()")=0
+	  		s lib = $Case(isProperty, 1:$Property(child, childLibelle), :$Method(child, $E(childLibelle, 1, *-2)))
+			q "{"_cad_",""childLibelle"":"_..Escape(lib)_"""}"
+		}
+		else {
+			s lib = $Case($Find(libelle, "()"), 0:$Property(data, libelle), :$Method(data, $E(libelle, 1, *-2)))
+			q "{""id"":"""_..Escape(data.%Id())_""",""libelle"":"""_..Escape(lib)_"""}"
+		}
+	}
+  }
+	// Edit:Add 2015
+	// Persistent object
+  elseif $Case(data, "true":1, "false":1, :0) {
+	  q data
+  }
+  elseif ($FIND(data,".")) {
+	;; This $ISVALIDNUM below is causing some %String property types that are valid numbers (ie. .1293394) to be unescaped
+  	;; $ISVALIDNUM allows for periods. Need to check for a . in another elseif and escape it like a string "".
+
+	//type string
+	q:data="" "null"
+	q """"_..Escape(data)_""""
+  }
+  elseif (+data=data) { // $ISVALIDNUM(data) { // && ($L(data)=1)
+  	;; If it's a numeric value then return the value as is. 2008 EDIT
+	// type number
+	q data
+	
+  }
+  else {
+	//type string
+	q:data="" "null"
+	q """"_..Escape(data)_""""
+  }
+}
+
+/// Return an encoded JSON string of the object.<br>
+Method GetJSONFromObject() As %String [ CodeMode = objectgenerator ]
+{
+	d %code.WriteLine(" q ..Encode(..GetAsArrayOfDataTypes())")
+}
+
+/// Returns the object as an %ArrayOfDataTypes key=>value pair set.
+/// This is helpful when trying to return a %ListOfDataTypes in JSON form, by quickly building an array object to Insert.
+Method GetAsArrayOfDataTypes() As %ArrayOfDataTypes [ CodeMode = objectgenerator ]
+{
+	// Wrap the object in an array
+	d %code.WriteLine(" s array = ##class(%ArrayOfDataTypes).%New()")
+	
+	// Rip through each property of the class.. that does not start with a %
+	// Insert each property as a key=>value pair in the array
+	for i=1:1:%compiledclass.Properties.Count()
+	{
+		s property = %compiledclass.Properties.GetAt(i)
+		
+		// %Library.Date
+		if (property.Type = "%Library.Date") {
+			d %code.WriteLine(" s dateCache = .."_property.Name_"")
+			d %code.WriteLine(" s dateString = $Case(dateCache, """":"""", :$zd(dateCache, 3,,,,,,,""""))")
+			d %code.WriteLine(" d array.SetAt(dateString,"""_property.Name_""")")
+		}
+		
+		// .%Id()
+		elseif (property.Name = "%%OID") {
+			d %code.WriteLine(" d array.SetAt(..%Id(),""id"")")
+		}
+		elseif ($E(property.Name) '= "%") {
+			if (property.Collection="array") {
+				d %code.WriteLine(" s list = ##class(%ListOfDataTypes).%New()")
+				d %code.WriteLine(" for i=1:1:.."_property.Name_".Count() {")
+				d %code.WriteLine(" 	s child = .."_property.Name_".GetAt(i).GetAsArrayOfDataTypes()")
+				d %code.WriteLine(" 	d list.Insert(child)")
+				d %code.WriteLine(" }")
+				d %code.WriteLine(" d array.SetAt(list,"""_property.Name_""")")
+			}
+			elseif ($E(property.Type) = "%") {
+				d %code.WriteLine(" d array.SetAt(.."_property.Name_","""_property.Name_""")")
+			}
+			elseif (property.Calculated = 0) {
+				d %code.WriteLine(" d array.SetAt($Case(.."_property.Name_","""":"""",:.."_property.Name_".%Id()),"""_property.Name_""")")
+			}
+		}
+	}
+	
+	if ($Get(%parameter("JSONLIBELLE"))'="") {
+		d %code.WriteLine(" d array.SetAt(.."_%parameter("JSONLIBELLE")_",""childLibelle"")")
+	}
+	
+	if ($Get(%parameter("ExtendGetJSONFromObject"))'="") {
+		d %code.WriteLine(" d .."_%parameter("ExtendGetJSONFromObject")_"(.array)")
+	}
+	
+	// Return an %ArrayOfDataTypes representation of the object
+	d %code.WriteLine(" q array")
+}
+
+/// Returns an OREF populated with the values from the JSON
+ClassMethod SetObjectFromJSON(JSON As %String) As %RegisteredObject [ CodeMode = objectgenerator ]
+{
+	d %code.WriteLine(" d ..SetObjectFromArray(..Decode(JSON))")
+}
+
+ClassMethod SetObjectFromArray(myArray) As %RegisteredObject [ CodeMode = objectgenerator ]
+{
+	// Permet de gérer l'id et donc la création/modification des objets
+	d %code.WriteLine(" s OID = myArray.GetAt(""id"")")
+	d %code.WriteLine(" if (OID=0) { s obj = ##class("_%compiledclass.Name_").%New() }")
+	d %code.WriteLine(" else { s obj = ##class("_%compiledclass.Name_").%OpenId(OID) }")
+	
+	for i=1:1:%compiledclass.Properties.Count()
+	{
+		s property = %compiledclass.Properties.GetAt(i)
+		
+		if ($EXTRACT(property.Name) '= "%")
+		{
+			// %Library.Date
+			if (property.Type = "%Library.Date") {
+				d %code.WriteLine(" s dateString = myArray.GetAt("""_property.Name_""")")
+				d %code.WriteLine(" s formatedDate = $Case(dateString, """":"""", :$zdh(dateString, 3,,,,,,,""""))")
+				d %code.WriteLine(" s obj."_property.Name_" = formatedDate")
+			}
+			
+			// %Library.GlobalBinaryStream
+			elseif (property.Type = "%Library.GlobalBinaryStream") {
+				d %code.WriteLine(" s val = myArray.GetAt("""_property.Name_""")")
+				d %code.WriteLine(" if $IsObject(val) { d obj."_property.Name_".CopyFrom(val) }")
+				d %code.WriteLine(" else { d obj."_property.Name_".Write(val) }")
+			}
+			
+			// %Library.*
+			elseif ($Extract(property.Type, 1, 8) = "%Library") {
+				if (property.Calculated = 0) {
+					d %code.WriteLine(" s obj."_property.Name_" = myArray.GetAt("""_property.Name_""")")
+				}
+			}
+			
+			// Si c'est une relation complexe
+			elseif (property.Collection="array") {
+				d %code.WriteLine(" d obj."_property.Name_".Clear()")
+				d %code.WriteLine(" s list = myDecodedArray.GetAt("""_property.Name_""")")
+				d %code.WriteLine(" for i=1:1:list.Count() { ")
+				d %code.WriteLine(" 	s child = $ZObjClassMethod("""_property.Type_""", ""SetObjectFromArray"",  list.GetAt(i))")
+				d %code.WriteLine(" 	d obj."_property.Name_".Insert(child)")
+				d %code.WriteLine(" }")
+			}
+			
+			// Si c'est object simple
+			else {
+				d %code.WriteLine(" d obj."_property.Name_"SetObjectId(myArray.GetAt("""_property.Name_"""))")
+			}
+		}
+	}
+	   
+	d %code.WriteLine(" q obj")
+}
+
+}
